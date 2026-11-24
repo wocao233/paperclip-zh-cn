@@ -1,0 +1,300 @@
+import { useEffect, useId, useRef, useState } from "react";
+import { useTranslation } from "@/i18n";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Camera, LoaderCircle, Save, Trash2, UserRoundPen } from "lucide-react";
+import type { AuthSession, CurrentUserProfile, UpdateCurrentUserProfile } from "@paperclipai/shared";
+import { authApi } from "@/api/auth";
+import { useAccountBoundMutation } from "@/hooks/useAccountBoundMutation";
+import { assetsApi } from "@/api/assets";
+import { QueryErrorState, useQueryView } from "@/components/QueryView";
+import { useBreadcrumbs } from "../context/BreadcrumbContext";
+import { useCompany } from "../context/CompanyContext";
+import { queryKeys } from "../lib/queryKeys";
+import { InboxAgentPolicyControl } from "@/components/InboxAgentPolicyControl";
+import { ProductAnalyticsSetting } from "@/components/ProductAnalyticsSetting";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { describeError } from "@/api/errors";
+
+function deriveInitials(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) return `${parts[0]?.[0] ?? ""}${parts[parts.length - 1]?.[0] ?? ""}`.toUpperCase();
+  return name.slice(0, 2).toUpperCase();
+}
+
+export function ProfileSettings() {
+  const { t } = useTranslation();
+  const { setBreadcrumbs } = useBreadcrumbs();
+  const { selectedCompanyId, selectedCompany } = useCompany();
+  const queryClient = useQueryClient();
+  const avatarInputId = useId();
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  // Unedited fields show the session's saved values from the first frame; a
+  // restored session must not render an empty name until an effect fills it.
+  const [nameDraft, setName] = useState<string | null>(null);
+  const [imageDraft, setImage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const sessionQuery = useQuery({
+    queryKey: queryKeys.auth.session,
+    queryFn: () => authApi.getSession(),
+  });
+  const sessionView = useQueryView(sessionQuery);
+  const name = nameDraft ?? sessionQuery.data?.user.name ?? "";
+  const image = imageDraft ?? sessionQuery.data?.user.image ?? "";
+
+  useEffect(() => {
+    setBreadcrumbs([
+      { label: t("profileSettings.settings"), href: "/company/settings" },
+      { label: t("profileSettings.profile") },
+    ]);
+  }, [setBreadcrumbs, t]);
+
+  useEffect(() => {
+    setName(null);
+    setImage(null);
+  }, [sessionQuery.data]);
+
+  function syncSessionProfile(profile: CurrentUserProfile) {
+    queryClient.setQueryData<AuthSession | null>(queryKeys.auth.session, (current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        user: {
+          ...current.user,
+          ...profile,
+        },
+      };
+    });
+  }
+
+  // A restored session can show one account while the cookie belongs to
+  // another, and the server saves for the cookie's user. Account-bound
+  // mutations wait for a verified session and abort if the user changed.
+  async function persistProfile(input: UpdateCurrentUserProfile, assertCurrentAccount: () => void) {
+    assertCurrentAccount();
+    const profile = await authApi.updateProfile(input);
+    assertCurrentAccount();
+    syncSessionProfile(profile);
+    return profile;
+  }
+
+  function resolveProfileName() {
+    return name.trim() || sessionQuery.data?.user.name || "Board";
+  }
+
+  const updateMutation = useAccountBoundMutation({
+    mutationFn: (input: UpdateCurrentUserProfile, { assertCurrentAccount }) => persistProfile(input, assertCurrentAccount),
+    onSuccess: (profile) => {
+      setActionError(null);
+      setName(profile.name ?? "");
+      setImage(profile.image ?? "");
+    },
+    onError: (error) => {
+      setActionError(describeError(error).body);
+    },
+  });
+
+  const uploadAvatarMutation = useAccountBoundMutation({
+    mutationFn: async (file: File, { assertCurrentAccount }) => {
+      if (!selectedCompanyId) {
+        throw new Error("Select an organization before uploading a profile avatar.");
+      }
+
+      const asset = await assetsApi.uploadImage(
+        selectedCompanyId,
+        file,
+        `profiles/${sessionQuery.data?.user.id ?? "board-user"}`,
+      );
+      return persistProfile({ name: resolveProfileName(), image: asset.contentPath }, assertCurrentAccount);
+    },
+    onSuccess: (profile) => {
+      setActionError(null);
+      setName(profile.name ?? "");
+      setImage(profile.image ?? "");
+    },
+    onError: (error) => {
+      setActionError(describeError(error).body);
+    },
+  });
+
+  const removeAvatarMutation = useAccountBoundMutation({
+    mutationFn: (_input, { assertCurrentAccount }) => persistProfile({ name: resolveProfileName(), image: null }, assertCurrentAccount),
+    onSuccess: (profile) => {
+      setActionError(null);
+      setName(profile.name ?? "");
+      setImage(profile.image ?? "");
+    },
+    onError: (error) => {
+      setActionError(describeError(error).body);
+    },
+  });
+
+  if (sessionQuery.isLoading || sessionView.kind === "reconnecting") {
+    return <div className="text-sm text-muted-foreground">{t("profileSettings.loading")}</div>;
+  }
+
+  if (sessionView.kind === "error") {
+    return (
+      <QueryErrorState
+        size="page"
+        error={sessionQuery.error}
+        action={t("profileSettings.loadProfileAction")}
+        onRetry={sessionView.retry}
+        retrying={sessionView.isFetching}
+      />
+    );
+  }
+
+  if (!sessionQuery.data) {
+    return <div className="text-sm text-destructive">{t("profileSettings.failedToLoad")}</div>;
+  }
+
+  const currentName = name.trim() || sessionQuery.data.user.name || t("profileSettings.board");
+  const currentImage = image.trim() || null;
+  const initials = deriveInitials(currentName);
+  const isSavingProfile = updateMutation.isPending || uploadAvatarMutation.isPending || removeAvatarMutation.isPending;
+  const uploadHint = selectedCompany
+    ? t("profileSettings.uploadStored", { company: selectedCompany.name })
+    : t("profileSettings.uploadSelectCompany");
+
+  return (
+    <div className="max-w-6xl space-y-6">
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <UserRoundPen className="h-5 w-5 text-muted-foreground" />
+          <h1 className="text-lg font-semibold">{t("profileSettings.profile")}</h1>
+        </div>
+        <p className="text-sm text-muted-foreground">
+          {t("profileSettings.profileDescription")}
+        </p>
+      </div>
+
+      {actionError ? (
+        <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          {actionError}
+        </div>
+      ) : null}
+
+      <section className="space-y-8">
+        <Card className="block relative overflow-hidden rounded-(--rad-28) border-border/70">
+          <div className="absolute inset-x-0 top-0 h-32 bg-(image:--gradient-extract-26)" />
+          <div className="absolute inset-0 bg-(image:--gradient-extract-7)" />
+          <div className="relative p-6 pt-10">
+            <div className="flex flex-wrap items-end gap-5 rounded-(--rad-24) border border-border/70 bg-background/92 p-5 shadow-(--shadow-extract-18) backdrop-blur-sm">
+              <div className="space-y-3">
+                <label
+                  htmlFor={avatarInputId}
+                  className="group relative block cursor-pointer rounded-full focus-within:outline-none focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background"
+                >
+                  <input
+                    ref={avatarInputRef}
+                    id={avatarInputId}
+                    type="file"
+                    accept="image/*"
+                    className="sr-only"
+                    disabled={!selectedCompanyId || isSavingProfile}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (!file) return;
+                      uploadAvatarMutation.mutate(file);
+                      event.target.value = "";
+                    }}
+                  />
+                  <span className="absolute inset-0 z-10 rounded-full bg-black/0 transition-colors group-hover:bg-black/14 group-focus-within:bg-black/14" />
+                  <span className="absolute bottom-1 right-1 z-20 flex size-9 items-center justify-center rounded-full border border-background bg-primary text-primary-foreground shadow-sm">
+                    {uploadAvatarMutation.isPending ? <LoaderCircle className="size-4 animate-spin" /> : <Camera className="size-4" />}
+                  </span>
+                  <Avatar size="lg" className="data-[size=lg]:size-24 ring-4 ring-background shadow-xl">
+                    {currentImage ? <AvatarImage src={currentImage} alt={currentName} /> : null}
+                    <AvatarFallback>{initials}</AvatarFallback>
+                  </Avatar>
+                </label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => avatarInputRef.current?.click()}
+                    disabled={!selectedCompanyId || isSavingProfile}
+                  >
+                    {uploadAvatarMutation.isPending ? <LoaderCircle className="size-4 animate-spin" /> : <Camera className="size-4" />}
+                    {currentImage ? t("profileSettings.changePhoto") : t("profileSettings.uploadPhoto")}
+                  </Button>
+                  {currentImage ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => removeAvatarMutation.mutate()}
+                      disabled={isSavingProfile}
+                    >
+                      {removeAvatarMutation.isPending ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                      {t("profileSettings.remove")}
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="min-w-0 flex-1 space-y-2 pb-1">
+                <div>
+                  <h2 className="truncate text-2xl font-semibold text-foreground">{currentName}</h2>
+                  <p className="truncate text-sm text-muted-foreground">{sessionQuery.data.user.email ?? t("profileSettings.noEmail")}</p>
+                </div>
+                <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
+                  {t("profileSettings.clickAvatar", { hint: uploadHint })}
+                </p>
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        <form
+          className="grid gap-6 md:grid-cols-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            updateMutation.mutate({ name: resolveProfileName(), image: image.trim() || null });
+          }}
+        >
+          <div className="space-y-2">
+            <Label htmlFor="profile-name">{t("profileSettings.displayName")}</Label>
+            <Input
+              id="profile-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              maxLength={120}
+              placeholder={t("profileSettings.board")}
+            />
+            <p className="text-xs text-muted-foreground">
+              {t("profileSettings.displayNameHint")}
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="profile-email">{t("profileSettings.email")}</Label>
+            <Input
+              id="profile-email"
+              value={sessionQuery.data.user.email ?? ""}
+              readOnly
+              disabled
+            />
+            <p className="text-xs text-muted-foreground">
+              {t("profileSettings.emailHint")}
+            </p>
+          </div>
+
+          <div className="md:col-span-2 flex justify-end">
+            <Button type="submit" disabled={isSavingProfile || !name.trim()}>
+              {updateMutation.isPending ? <LoaderCircle className="size-4 animate-spin" /> : <Save className="size-4" />}
+              {updateMutation.isPending ? t("profileSettings.saving") : t("profileSettings.saveProfile")}
+            </Button>
+          </div>
+        </form>
+
+        <InboxAgentPolicyControl companyId={selectedCompanyId} />
+
+        <ProductAnalyticsSetting config={sessionQuery.data.browserAnalytics} />
+      </section>
+    </div>
+  );
+}

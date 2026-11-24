@@ -1,0 +1,10 @@
+import { t } from "@/i18n";
+import { TabFilters } from "@/components/TabBar";
+
+export const CATALOG_SOURCES = ["paperclip", "composio", "arcade", "installed", "all"] as const;
+export type CatalogSource = typeof CATALOG_SOURCES[number];
+export const CATALOG_SOURCE_NAMES = { paperclip: "Paperclip", composio: "Composio", arcade: "Arcade", executor: "Executor", installed: t("srcFilter.installed"), all: t("srcFilter.all") };
+
+export function CatalogSourceFilters({ source, onChange }: { source: CatalogSource; onChange: (source: CatalogSource) => void }) {
+  return <TabFilters label={t("srcFilter.aria")} size="standard" items={CATALOG_SOURCES.map(value => ({ value, label: CATALOG_SOURCE_NAMES[value] }))} value={source} onValueChange={onChange} />;
+}

@@ -1,0 +1,690 @@
+import { CoordinatorPresentation } from "./coordinator/CoordinatorPresentation";
+import { useTranslation } from "@/i18n";
+import { CoordinatorChatReferencesProvider } from "./coordinator/CoordinatorChatReferences";
+import { useCoordinatorWorkspaceEnabled } from "@/hooks/useCoordinatorWorkspaceEnabled";
+import { useBrowserTimeZoneSync } from "@/hooks/useBrowserTimeZoneSync";
+import { useDesignSandbox } from "@/context/DesignSandboxContext";
+import { DesignSandboxSidebar } from "./DesignSandboxSidebar";
+import { BoardDialogs } from "./BoardDialogs";
+import { ChatSetupSidebarProvider } from "@/context/ChatSetupSidebarContext";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Outlet, useLocation, useNavigate, useNavigationType, useParams } from "@/lib/router";
+import { Sidebar } from "./Sidebar";
+import { CompanySettingsSidebar } from "./CompanySettingsSidebar";
+import { CompanySettingsNav } from "./access/CompanySettingsNav";
+import { AppsSidebar, AppsMobileNav } from "./AppsSidebar";
+import { AppDetailSidebar } from "./AppConnectionSidebar";
+import { AgentContextualSidebar } from "./AgentContextualSidebar";
+import { SkillsContextualSidebar } from "./SkillsContextualSidebar";
+import { BreadcrumbBar } from "./BreadcrumbBar";
+import { PropertiesPanel } from "./PropertiesPanel";
+import { CommandPalette } from "./CommandPalette";
+import { KeyboardShortcutsCheatsheet } from "./KeyboardShortcutsCheatsheet";
+import { ToastViewport } from "./ToastViewport";
+import { AnnouncementWell } from "./AnnouncementWell";
+import { PluginAppShellOverlays } from "./PluginAppShellOverlays";
+import { MobileBottomNav } from "./MobileBottomNav";
+import { WorktreeBanner } from "./WorktreeBanner";
+import { DevRestartBanner } from "./DevRestartBanner";
+import { StandaloneBrowserControls } from "./StandaloneBrowserControls";
+import { RouteErrorBoundary } from "./RouteErrorBoundary";
+import { AgentConversationsSidebar } from "./AgentConversationsSidebar";
+import { useAgentChatEnabled } from "../hooks/useAgentChatEnabled";
+import { SidebarShell } from "./SidebarShell";
+import { SecondarySidebar } from "./SecondarySidebar";
+import { ContextualSidebarFrame } from "./ContextualSidebarFrame";
+import { SidebarAccountMenu } from "./SidebarAccountMenu";
+import { useDialogActions } from "../context/DialogContext";
+import { usePanel } from "../context/PanelContext";
+import { useCompany } from "../context/CompanyContext";
+import { useSidebar } from "../context/SidebarContext";
+import { useKeyboardShortcuts } from "../hooks/useKeyboardShortcuts";
+import { useStreamlinedUiEnabled } from "../hooks/useStreamlinedUiEnabled";
+import { useCompanyPageMemory } from "../hooks/useCompanyPageMemory";
+import { useMobileNavVisibility } from "../hooks/useMobileNavVisibility";
+import { useMobileVisualViewport } from "../hooks/useMobileVisualViewport";
+import { healthApi } from "../api/health";
+import { resolveArchivedCompanyBounce, shouldSyncCompanySelectionFromRoute } from "../lib/company-selection";
+import { useOptionalToastActions } from "../context/ToastContext";
+import {
+  applyMainContentScrollTop,
+  NavigationScrollMemory,
+  resetNavigationScroll,
+  shouldResetScrollOnNavigation,
+} from "../lib/navigation-scroll";
+import { queryKeys } from "../lib/queryKeys";
+import { scheduleMainContentFocus } from "../lib/main-content-focus";
+import { pinDocumentScrollToZero } from "../lib/pin-document-scroll";
+import {
+  classifyShellRoute,
+  getCompanyPathSegments,
+  rememberContextualSidebarOrigin,
+  type ContextualSidebarSurface,
+} from "../lib/shell-navigation";
+import { cn } from "../lib/utils";
+import { NotFoundPage } from "../pages/NotFound";
+import { PluginSlotMount, resolveRouteSidebarSlot, usePluginSlots } from "../plugins/slots";
+
+function getCompanyRouteSegment(pathname: string, companyPrefix: string | undefined): string | null {
+  return getCompanyPathSegments(pathname, companyPrefix)[0]?.toLowerCase() ?? null;
+}
+
+const RESERVED_APP_SUBPATHS = new Set([
+  "browse",
+  "connections",
+  "assistant-connection",
+  "connect",
+  "chat",
+  "vercel-connect",
+  "review",
+  "attention",
+  "gateways",
+  "advanced",
+  "app",
+]);
+
+export function Layout({ sidebarSections }: { sidebarSections?: ReactNode }) {
+  const { t } = useTranslation();
+  const designSandbox = useDesignSandbox();
+  const {
+    sidebarOpen,
+    setSidebarOpen,
+    toggleSidebar,
+    isMobile,
+  } = useSidebar();
+  const { openNewIssue, openOnboarding } = useDialogActions();
+  const { panelContent, panelVisible, panelShowsArtifact, togglePanelVisible, setPanelVisible } = usePanel();
+  // Optional: Layout also renders in harnesses without a ToastProvider.
+  const pushToast = useOptionalToastActions()?.pushToast ?? null;
+  const {
+    companies,
+    loading: companiesLoading,
+    selectedCompany,
+    selectedCompanyId,
+    selectionSource,
+    setSelectedCompanyId,
+  } = useCompany();
+  const {
+    companyPrefix,
+    pluginRoutePath: matchedPluginRoutePath,
+    agentId,
+  } = useParams<{
+    companyPrefix: string;
+    pluginRoutePath?: string;
+    agentId?: string;
+  }>();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  const { enabled: classicStreamlinedUiEnabled } = useStreamlinedUiEnabled();
+  const { enabled: coordinatorWorkspaceEnabled, userId: workspacePreferenceUserId } = useCoordinatorWorkspaceEnabled();
+  useBrowserTimeZoneSync(selectedCompanyId, workspacePreferenceUserId);
+  const streamlinedUiEnabled = classicStreamlinedUiEnabled || coordinatorWorkspaceEnabled;
+  const shellRoute = classifyShellRoute(location.pathname, companyPrefix);
+  const isCompanySettingsRoute = shellRoute.builtInContextualSurface === "settings";
+  const companyPathSegments = shellRoute.companySegments;
+  const isTaskDetailRoute = shellRoute.isTaskDetail;
+  useLayoutEffect(() => {
+    if (coordinatorWorkspaceEnabled) setPanelVisible(false);
+  }, [coordinatorWorkspaceEnabled, location.pathname, setPanelVisible]);
+  const { enabled: agentChatEnabled } = useAgentChatEnabled();
+  const isAgentChatRoute = agentChatEnabled && companyPathSegments[0]?.toLowerCase() === "chats";
+  const desktopAgentChat = !isMobile && isAgentChatRoute;
+  const measureChatSpace = desktopAgentChat && panelVisible && panelContent != null && panelShowsArtifact;
+  const chatAreaRef = useRef<HTMLDivElement>(null);
+  const [chatListTooWide, setChatListTooWide] = useState(false);
+  const chatListCollapsed = measureChatSpace && chatListTooWide;
+
+  useLayoutEffect(() => {
+    const area = chatAreaRef.current;
+    if (!measureChatSpace || !area) return;
+    const tokens = getComputedStyle(document.documentElement);
+    const listWidth = Number.parseFloat(tokens.getPropertyValue("--sz-280px"));
+    const conversationMinWidth = Number.parseFloat(tokens.getPropertyValue("--sz-420px"));
+    const measure = () => setChatListTooWide(area.clientWidth < listWidth + conversationMinWidth);
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(area);
+    return () => observer?.disconnect();
+  }, [measureChatSpace]);
+
+  // Chat keeps its header beside the agent sidebar, including before an agent is selected.
+  const useStreamlinedTaskDetailShell = streamlinedUiEnabled && (isTaskDetailRoute || isAgentChatRoute);
+  const useInsetTaskDetailHeader = useStreamlinedTaskDetailShell && !isAgentChatRoute;
+  const isToolsRoute = companyPathSegments[0]?.toLowerCase() === "tools";
+  const isAppsRoute = companyPathSegments[0]?.toLowerCase() === "apps";
+  const appDetailConnectionId =
+    isAppsRoute && companyPathSegments[1] && !RESERVED_APP_SUBPATHS.has(companyPathSegments[1].toLowerCase())
+      ? companyPathSegments[1]
+      : null;
+  const appDetailApplicationId =
+    isAppsRoute && companyPathSegments[1]?.toLowerCase() === "app" && companyPathSegments[2]
+      ? companyPathSegments[2]
+      : null;
+  const onboardingTriggered = useRef(false);
+  const previousPathname = useRef<string | null>(null);
+  const mainContentRef = useRef<HTMLElement | null>(null);
+  const scrollMemory = useRef(new NavigationScrollMemory());
+  const activeScrollKey = useRef<string>(location.key);
+  const mobileNavVisible = useMobileNavVisibility(isMobile, location.pathname);
+  const mobileViewportRef = useMobileVisualViewport(true);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const matchedCompany = useMemo(() => {
+    if (!companyPrefix) return null;
+    const requestedPrefix = companyPrefix.toUpperCase();
+    return companies.find((company) => company.issuePrefix.toUpperCase() === requestedPrefix) ?? null;
+  }, [companies, companyPrefix]);
+  const hasUnknownCompanyPrefix =
+    Boolean(companyPrefix) && !companiesLoading && companies.length > 0 && !matchedCompany;
+  const pluginRoutePath = useMemo(
+    () => matchedPluginRoutePath?.toLowerCase() ?? getCompanyRouteSegment(location.pathname, companyPrefix),
+    [companyPrefix, location.pathname, matchedPluginRoutePath],
+  );
+  const routeSidebarCompanyId = matchedCompany?.id ?? null;
+  const routeSidebarCompanyPrefix = matchedCompany?.issuePrefix ?? null;
+  const { slots: routeSidebarSlots } = usePluginSlots({
+    slotTypes: ["page", "routeSidebar"],
+    companyId: routeSidebarCompanyId,
+    enabled: Boolean(routeSidebarCompanyId && pluginRoutePath),
+  });
+  const routeSidebarSlot = useMemo(
+    () => resolveRouteSidebarSlot(routeSidebarSlots, pluginRoutePath),
+    [pluginRoutePath, routeSidebarSlots],
+  );
+  const sidebarContext = useMemo(
+    () => ({
+      companyId: routeSidebarCompanyId,
+      companyPrefix: routeSidebarCompanyPrefix,
+    }),
+    [routeSidebarCompanyId, routeSidebarCompanyPrefix],
+  );
+  // Most contextual routes replace the global navigation inside the same
+  // sidebar shell. Apps, Agent details, and Routine details are the
+  // exceptions in Streamlined UI: their local navigation is a second rail
+  // beside the persistent company nav.
+  const sharedSecondarySidebar = isCompanySettingsRoute ? (
+    <CompanySettingsSidebar />
+  ) : !streamlinedUiEnabled && shellRoute.builtInContextualSurface === "skills" ? (
+    <SkillsContextualSidebar />
+  ) : appDetailConnectionId ? (
+    <AppDetailSidebar kind="connection" connectionId={appDetailConnectionId} />
+  ) : appDetailApplicationId ? (
+    <AppDetailSidebar kind="application" applicationId={appDetailApplicationId} />
+  ) : isAppsRoute || isToolsRoute ? (
+    <AppsSidebar />
+  ) : routeSidebarSlot ? (
+    streamlinedUiEnabled ? (
+      <ContextualSidebarFrame
+        surface={`plugin:${routeSidebarSlot.id}`}
+        title={routeSidebarSlot.displayName}
+      >
+        <PluginSlotMount
+          slot={routeSidebarSlot}
+          context={sidebarContext}
+          className="min-h-0 flex-1"
+          missingBehavior="placeholder"
+        />
+      </ContextualSidebarFrame>
+    ) : (
+      <PluginSlotMount
+        slot={routeSidebarSlot}
+        context={sidebarContext}
+        className="h-full w-full"
+        missingBehavior="placeholder"
+      />
+    )
+  ) : null;
+  const secondarySidebar = isAgentChatRoute ? <AgentConversationsSidebar /> : shellRoute.builtInContextualSurface === "agent" && agentId ? (
+    <AgentContextualSidebar agentRef={agentId} />
+  ) : sharedSecondarySidebar;
+  const hasSecondarySidebar = secondarySidebar != null;
+  const keepsPrimarySidebar = streamlinedUiEnabled && hasSecondarySidebar && (
+    isAgentChatRoute
+    || shellRoute.builtInContextualSurface === "agent"
+    || isAppsRoute
+    || isToolsRoute
+  );
+  const replacesPrimarySidebar = streamlinedUiEnabled && hasSecondarySidebar && !keepsPrimarySidebar;
+  const showsAdjacentSecondarySidebar = hasSecondarySidebar && (!streamlinedUiEnabled || keepsPrimarySidebar);
+  const contextualSurface: ContextualSidebarSurface | null = !streamlinedUiEnabled || !hasSecondarySidebar
+    ? null
+    : routeSidebarSlot && !shellRoute.builtInContextualSurface
+      ? `plugin:${routeSidebarSlot.id}`
+      : shellRoute.builtInContextualSurface;
+  const previousShellRoute = useRef<{
+    pathname: string;
+    surface: ContextualSidebarSurface | null;
+  } | null>(null);
+  const { data: health } = useQuery({
+    queryKey: queryKeys.health,
+    queryFn: () => healthApi.get(),
+    refetchInterval: (query) => {
+      const data = query.state.data as { devServer?: { enabled?: boolean } } | undefined;
+      return data?.devServer?.enabled ? 2000 : false;
+    },
+    refetchIntervalInBackground: false,
+  });
+
+  useEffect(() => {
+    const previous = previousShellRoute.current;
+    if (
+      contextualSurface
+      && companyPrefix
+      && previous
+      && previous.surface !== contextualSurface
+      && previous.pathname !== location.pathname
+    ) {
+      rememberContextualSidebarOrigin({
+        surface: contextualSurface,
+        companyPrefix,
+        previousPathname: previous.pathname,
+      });
+    }
+    previousShellRoute.current = { pathname: location.pathname, surface: contextualSurface };
+  }, [companyPrefix, contextualSurface, location.pathname]);
+
+  useEffect(() => {
+    if (companiesLoading || onboardingTriggered.current) return;
+    if (health?.deploymentMode === "authenticated") return;
+    // Cloud provisions the single company for a stack, and POST /companies is a
+    // 403 floor there — auto-opening the wizard could only dead-end.
+    if (health?.cloud) return;
+    if (companies.length === 0) {
+      onboardingTriggered.current = true;
+      openOnboarding();
+    }
+  }, [companies, companiesLoading, openOnboarding, health?.cloud, health?.deploymentMode]);
+
+  useEffect(() => {
+    if (!companyPrefix || companiesLoading || companies.length === 0) return;
+
+    if (!matchedCompany) {
+      const fallback = (selectedCompanyId ? companies.find((company) => company.id === selectedCompanyId) : null)
+        ?? companies[0]
+        ?? null;
+      if (fallback && selectedCompanyId !== fallback.id) {
+        setSelectedCompanyId(fallback.id, { source: "route_sync" });
+      }
+      return;
+    }
+
+    if (companyPrefix !== matchedCompany.issuePrefix) {
+      const suffix = location.pathname.replace(/^\/[^/]+/, "");
+      navigate(`/${matchedCompany.issuePrefix}${suffix}${location.search}`, { replace: true });
+      return;
+    }
+
+    // Stale state (remembered paths, history, bookmarks, restored tabs)
+    // deposits users into archived companies long after archiving; a cold
+    // arrival bounces to an active company instead of dwelling there.
+    // Deliberate visits (the company is already the selection) stay put.
+    const bounce = resolveArchivedCompanyBounce({
+      matchedCompany,
+      selectedCompanyId,
+      companies,
+    });
+    if (bounce) {
+      pushToast?.({
+        title: `${matchedCompany.name} is archived`,
+        body: `Switched to ${bounce.name}.`,
+        tone: "info",
+        dedupeKey: `archived-company-bounce:${matchedCompany.id}`,
+      });
+      setSelectedCompanyId(bounce.id, { source: "route_sync" });
+      navigate(`/${bounce.issuePrefix}/dashboard`, { replace: true });
+      return;
+    }
+
+    if (
+      shouldSyncCompanySelectionFromRoute({
+        selectionSource,
+        selectedCompanyId,
+        routeCompanyId: matchedCompany.id,
+      })
+    ) {
+      setSelectedCompanyId(matchedCompany.id, { source: "route_sync" });
+    }
+  }, [
+    companyPrefix,
+    companies,
+    companiesLoading,
+    matchedCompany,
+    location.pathname,
+    location.search,
+    navigate,
+    pushToast,
+    selectionSource,
+    selectedCompanyId,
+    setSelectedCompanyId,
+  ]);
+
+  const togglePanel = togglePanelVisible;
+  const openSearch = useCallback(() => {
+    document.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "k",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    }));
+  }, []);
+
+  useCompanyPageMemory();
+
+  useKeyboardShortcuts({
+    onNewIssue: () => openNewIssue(),
+    onSearch: openSearch,
+    onToggleSidebar: toggleSidebar,
+    onTogglePanel: togglePanel,
+    onShowShortcuts: () => setShortcutsOpen(true),
+    onGoToInbox: () => navigate("/inbox"),
+  });
+
+  // Swipe gesture to open/close sidebar on mobile
+  useEffect(() => {
+    if (!isMobile) return;
+
+    const EDGE_ZONE = 30; // px from left edge to start open-swipe
+    const MIN_DISTANCE = 50; // minimum horizontal swipe distance
+    const MAX_VERTICAL = 75; // max vertical drift before we ignore
+
+    let startX = 0;
+    let startY = 0;
+
+    const onTouchStart = (e: TouchEvent) => {
+      const t = e.touches[0]!;
+      startX = t.clientX;
+      startY = t.clientY;
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      const t = e.changedTouches[0]!;
+      const dx = t.clientX - startX;
+      const dy = Math.abs(t.clientY - startY);
+
+      if (dy > MAX_VERTICAL) return; // vertical scroll, ignore
+
+      // Swipe right from left edge → open
+      if (!sidebarOpen && startX < EDGE_ZONE && dx > MIN_DISTANCE) {
+        setSidebarOpen(true);
+        return;
+      }
+
+      // Swipe left when open → close
+      if (sidebarOpen && dx < -MIN_DISTANCE) {
+        setSidebarOpen(false);
+      }
+    };
+
+    document.addEventListener("touchstart", onTouchStart, { passive: true });
+    document.addEventListener("touchend", onTouchEnd, { passive: true });
+
+    return () => {
+      document.removeEventListener("touchstart", onTouchStart);
+      document.removeEventListener("touchend", onTouchEnd);
+    };
+  }, [isMobile, sidebarOpen, setSidebarOpen]);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+
+    document.body.style.overflow = isMobile ? "visible" : "clip";
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isMobile]);
+
+  // `scrollIntoView` walks every ancestor scroll container. On a long thread
+  // the post-submit `scrollIntoView` on the new comment reaches `<html>` and
+  // animates `documentElement.scrollTop` via the browser's internal scroll
+  // algorithm, which bypasses the CSS `overflow` on the root element and
+  // visually shifts the entire shell (sidebar included) off-screen. Pin
+  // both roots to scrollTop=0 on every scroll tick.
+  useEffect(() => {
+    if (isMobile) return;
+    return pinDocumentScrollToZero();
+  }, [isMobile]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const mainContent = mainContentRef.current;
+    return scheduleMainContentFocus(mainContent);
+  }, [location.pathname]);
+
+  // Continuously record the scroll offset of the active history entry so a
+  // later back/forward navigation can restore it (see NavigationScrollMemory).
+  useEffect(() => {
+    const main = mainContentRef.current;
+    if (!main) return;
+    const recordScroll = () => {
+      scrollMemory.current.remember(activeScrollKey.current, main.scrollTop);
+    };
+    main.addEventListener("scroll", recordScroll, { passive: true });
+    return () => main.removeEventListener("scroll", recordScroll);
+  }, []);
+
+  useLayoutEffect(() => {
+    const main = mainContentRef.current;
+    const shouldResetScroll = shouldResetScrollOnNavigation({
+      previousPathname: previousPathname.current,
+      pathname: location.pathname,
+      navigationType,
+      state: location.state,
+    });
+
+    previousPathname.current = location.pathname;
+
+    const isHistoryPop = navigationType === "POP";
+    const restoredScrollTop = isHistoryPop ? scrollMemory.current.recall(location.key) : 0;
+    activeScrollKey.current = location.key;
+
+    if (isHistoryPop) {
+      applyMainContentScrollTop(main, restoredScrollTop);
+      // Cached page content can finish laying out a frame after commit; re-apply
+      // once it has so the restored offset isn't clamped to a shorter interim height.
+      const raf = requestAnimationFrame(() => applyMainContentScrollTop(main, restoredScrollTop));
+      return () => cancelAnimationFrame(raf);
+    }
+
+    if (shouldResetScroll) {
+      resetNavigationScroll(main);
+    }
+  }, [location.key, location.pathname, location.state, navigationType]);
+
+  return (
+    <CoordinatorPresentation.Provider value={coordinatorWorkspaceEnabled}>
+    <CoordinatorChatReferencesProvider enabled={coordinatorWorkspaceEnabled}>
+    <ChatSetupSidebarProvider>
+      <div
+      ref={mobileViewportRef}
+      data-mobile={isMobile ? "true" : undefined}
+      className={cn(
+        "paperclip-app-shell bg-background text-foreground pt-(--sz-safe-top)",
+        coordinatorWorkspaceEnabled && "coordinator-workspace",
+        // overflow-x-clip on mobile keeps a stray wide descendant from making the
+        // whole viewport scroll horizontally. clip (not hidden) leaves overflow-y
+        // computed as visible, so native body scroll + the sticky breadcrumb keep
+        // working.
+        isMobile ? "min-h-dvh overflow-x-clip" : "flex h-dvh flex-col overflow-clip",
+      )}
+      >
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-(--z-200) focus:rounded-md focus:bg-background focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {t("a11y.skipToMainContent")}
+      </a>      <WorktreeBanner />
+      <DevRestartBanner devServer={health?.devServer} />
+      <div className={cn("app-main-row min-h-0 flex-1", isMobile ? "w-full" : "flex overflow-clip")}>
+        {isMobile && sidebarOpen && (
+          <button
+            type="button"
+            className="fixed inset-0 z-40 bg-black/50"
+            onClick={() => setSidebarOpen(false)}
+            aria-label="Close sidebar"
+          />
+        )}
+
+        {isMobile ? (
+          <div
+            className={cn(
+              "fixed inset-y-0 left-0 z-50 flex flex-col overflow-hidden pt-(--sz-safe-top) transition-transform duration-100 ease-out",
+              sidebarOpen ? "translate-x-0" : "-translate-x-full"
+            )}
+          >
+            <div className="flex flex-1 min-h-0 overflow-hidden">
+              <div className="w-60 shrink-0 overflow-hidden">
+                {hasSecondarySidebar ? (
+                  <SecondarySidebar>{secondarySidebar}</SecondarySidebar>
+                ) : (
+                  <Sidebar>{sidebarSections}</Sidebar>
+                )}
+              </div>
+            </div>
+            <SidebarAccountMenu
+              deploymentMode={health?.deploymentMode}
+            />
+          </div>
+        ) : (
+          <SidebarShell
+            open={sidebarOpen}
+            resizable
+            storageKey={designSandbox ? "paperclip.design-proposals.sandbox.sidebar-width" : coordinatorWorkspaceEnabled ? "paperclip.coordinator.sidebar-width" : undefined}
+          >
+            {designSandbox ? <DesignSandboxSidebar /> : <>
+              <div className="flex flex-1 min-h-0">
+                {replacesPrimarySidebar ? (
+                  <SecondarySidebar>{secondarySidebar}</SecondarySidebar>
+                ) : (
+                  <Sidebar>{sidebarSections}</Sidebar>
+                )}
+              </div>
+              {sidebarOpen ? (
+                <AnnouncementWell health={health} placement="sidebar" />
+              ) : null}
+              <SidebarAccountMenu
+                deploymentMode={health?.deploymentMode}
+              />
+            </>}
+          </SidebarShell>
+        )}
+
+        {!isMobile && !isAgentChatRoute && ((showsAdjacentSecondarySidebar && !keepsPrimarySidebar) || (designSandbox && replacesPrimarySidebar)) ? (
+          <SecondarySidebar className="w-60 shrink-0">
+            {secondarySidebar}
+          </SecondarySidebar>
+        ) : null}
+
+        <div className={cn("app-content-column flex min-w-0 flex-col", isMobile ? "w-full" : "h-full flex-1")}>
+          <div
+            className={cn(
+              "app-breadcrumb",
+              !isMobile && useInsetTaskDetailHeader && "hidden",
+              isMobile && "sticky top-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/85",
+            )}
+          >
+            <StandaloneBrowserControls mobile={isMobile} />
+            <BreadcrumbBar showPropertiesToggle={isAgentChatRoute} toolbarAction={chatListCollapsed ? <AgentConversationsSidebar compact /> : undefined} />
+            {isMobile && isCompanySettingsRoute ? (
+              <div className="border-b border-border px-4 pb-3">
+                <CompanySettingsNav />
+              </div>
+            ) : null}
+          </div>
+          <div className={cn(
+            "app-content-row",
+            isMobile ? "block" : "flex flex-1 min-h-0",
+            !isMobile && useStreamlinedTaskDetailShell && "streamlined-task-detail-surface",
+          )}>
+            {!isMobile && keepsPrimarySidebar && !isAgentChatRoute ? (
+              <SecondarySidebar className="w-60 shrink-0 bg-background">
+                {secondarySidebar}
+              </SecondarySidebar>
+            ) : null}
+            <div
+              ref={desktopAgentChat ? chatAreaRef : undefined}
+              className={cn(desktopAgentChat ? "flex min-w-0 flex-1" : !isMobile && useStreamlinedTaskDetailShell ? "flex min-w-0 flex-1 flex-col" : "contents")}
+            >
+              {desktopAgentChat ? (
+                <SecondarySidebar className={cn("w-(--sz-280px) shrink-0 bg-background", chatListCollapsed && "hidden")}>
+                  {secondarySidebar}
+                </SecondarySidebar>
+              ) : null}
+              {!isMobile && useInsetTaskDetailHeader ? (
+                <>
+                  <StandaloneBrowserControls mobile={false} />
+                  <BreadcrumbBar taskDetailLayout />
+                </>
+              ) : null}
+              <main
+              id="main-content"
+              ref={mainContentRef}
+              tabIndex={-1}
+              // Publish the pinned-composer bottom offset to descendants
+              // (PAP-495): while the auto-hiding mobile nav is on screen, raise
+              // it to the nav height so a sticky composer clears the nav; drop
+              // it back to the safe-area dock when the nav hides. Desktop leaves
+              // the token at its :root default.
+              style={
+                isMobile
+                  ? ({
+                      "--tc-composer-bottom": mobileNavVisible
+                        ? "var(--tc-composer-visible-nav-offset)"
+                        : "var(--tc-composer-hidden-nav-offset)",
+                      "--mobile-nav-motion-duration": mobileNavVisible
+                        ? "var(--motion-mobile-nav-enter)"
+                        : "var(--motion-mobile-nav-exit)",
+                      "--mobile-nav-motion-ease": mobileNavVisible
+                        ? "var(--motion-ease-out-expo)"
+                        : "var(--motion-ease-standard)",
+                    } as CSSProperties)
+                  : undefined
+              }
+              className={cn(
+                "flex-1 p-4 outline-none md:p-6",
+                desktopAgentChat && "min-w-0",
+                // The task thread owns its scrollable top spacing. Leaving the
+                // page shell's top padding in place creates a stationary dark
+                // strip below the breadcrumb while messages scroll behind it.
+                !isMobile && useStreamlinedTaskDetailShell && "pt-0 md:pt-0",
+                // Reserve the scrollbar gutter on desktop so pages whose height
+                // changes (e.g. switching skill-detail tabs) don't widen/shift
+                // when the vertical scrollbar appears or disappears (PAP-10907).
+                isMobile
+                  ? isTaskDetailRoute
+                    ? "overflow-visible pb-(--tc-composer-visible-nav-offset)"
+                    : "overflow-visible pb-(--sz-calc-14)"
+                  : "overflow-auto [scrollbar-gutter:stable]",
+              )}
+            >
+              {isMobile && isAppsRoute && (!companyPathSegments[1] || companyPathSegments[1] === "review") ? <AppsMobileNav /> : null}
+              {hasUnknownCompanyPrefix ? (
+                <NotFoundPage
+                  scope="invalid_company_prefix"
+                  requestedPrefix={companyPrefix ?? selectedCompany?.issuePrefix}
+                />
+              ) : (
+                <RouteErrorBoundary>
+                  <Outlet />
+                </RouteErrorBoundary>
+              )}
+              </main>
+            </div>
+            <PropertiesPanel taskDetailLayout={!isMobile && (useStreamlinedTaskDetailShell || (coordinatorWorkspaceEnabled && companyPathSegments[0]?.toLowerCase() === "decisions"))} />
+          </div>
+        </div>
+      </div>
+      {isMobile && <MobileBottomNav visible={mobileNavVisible} />}
+      <CommandPalette />
+      <BoardDialogs />
+      <KeyboardShortcutsCheatsheet open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+      <ToastViewport />
+      {isMobile ? <AnnouncementWell health={health} placement="floating" /> : null}
+      <PluginAppShellOverlays localTrusted={health?.deploymentMode === "local_trusted"} />
+      </div>
+    </ChatSetupSidebarProvider>
+    </CoordinatorChatReferencesProvider>
+    </CoordinatorPresentation.Provider>
+  );
+}
